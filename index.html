@@ -943,9 +943,68 @@ function renderTabDiario(filtered){
   document.getElementById('tableDiario').innerHTML = html;
   window._showDay = iso => openModal(`Deals criados em ${iso}`, filtered.filter(x => x.d === iso));
 }
+async function checkLocalStorageRecovery(){
+  const old = localStorage.getItem('fgc_dash_status_v1');
+  const done = localStorage.getItem('fgc_dash_recovered');
+  if (!old || done) return;
+  let parsed;
+  try { parsed = JSON.parse(old); } catch(e) { return; }
+  const entries = Object.entries(parsed||{});
+  if (!entries.length){ localStorage.setItem('fgc_dash_recovered','1'); return; }
+
+  const div = document.createElement('div');
+  div.id = 'recoveryBanner';
+  div.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#FEF3C7;border-bottom:3px solid #D97706;padding:14px 20px;z-index:9999;font-size:13px;color:#78350F;display:flex;align-items:center;gap:14px;justify-content:center;flex-wrap:wrap;box-shadow:0 4px 12px rgba(0,0,0,.15)';
+  div.innerHTML = `
+    <span><b>⚠ Encontrei ${entries.length} status que você marcou anteriormente neste navegador</b>, mas que ainda não foram sincronizados pro banco compartilhado. Restaurar agora?</span>
+    <button id="recYes" style="padding:8px 16px;background:#D97706;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer">Restaurar ${entries.length} status</button>
+    <button id="recNo" style="padding:8px 16px;background:#fff;color:#78350F;border:1px solid #D97706;border-radius:6px;cursor:pointer">Descartar</button>
+  `;
+  document.body.appendChild(div);
+
+  document.getElementById('recYes').onclick = async () => {
+    const me = getMyName();
+    const rows = entries.map(([sfid, val]) => ({
+      sfid,
+      status: (typeof val === 'string') ? val : (val && val.v ? val.v : ''),
+      updated_by: (val && val.by) ? val.by : me,
+      updated_at: (val && val.t) ? val.t : new Date().toISOString()
+    })).filter(r => r.status);
+    div.innerHTML = `⏳ Restaurando ${rows.length} status pro Supabase...`;
+    try {
+      const BATCH = 100;
+      for (let i=0; i<rows.length; i+=BATCH){
+        const slice = rows.slice(i, i+BATCH);
+        const { error } = await sb.from('conta_status').upsert(slice, { onConflict:'sfid' });
+        if (error) throw error;
+      }
+      localStorage.setItem('fgc_dash_recovered','1');
+      div.innerHTML = `✓ <b>${rows.length} status restaurados!</b> Atualizando painel...`;
+      div.style.background = '#D1FAE5';
+      div.style.borderBottomColor = '#059669';
+      div.style.color = '#065F46';
+      await loadStatusesFromDB();
+      render();
+      setTimeout(() => div.remove(), 4000);
+    } catch(e){
+      console.error(e);
+      div.innerHTML = '❌ Erro ao restaurar: ' + (e.message||e) + '. Os dados ainda estão no seu navegador. Avise o admin.';
+      div.style.background = '#FEE2E2';
+      div.style.color = '#991B1B';
+    }
+  };
+  document.getElementById('recNo').onclick = () => {
+    if (confirm('Descartar permanentemente os ' + entries.length + ' status? Essa ação não pode ser desfeita.')) {
+      localStorage.setItem('fgc_dash_recovered','1');
+      div.remove();
+    }
+  };
+}
+
 (async () => {
   await loadStatusesFromDB();
   render();
+  checkLocalStorageRecovery();
 })();
 </script>
 </body>
