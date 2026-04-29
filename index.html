@@ -367,19 +367,39 @@ function renderKPIs(filtered){
   const ativos = filtered.filter(isAtivo).length;
   const desq = filtered.filter(isDesq).length;
   const ganho = filtered.filter(isGanho).length;
-  const ctlDeals = filtered.filter(d => d.g==='Controle').length;
-  const bdrDeals = filtered.filter(d => d.g==='BDRs').length;
+
+  // Carteira contextual: se BDR filtrado, mostra a carteira dele
+  const f = STATE.filters;
+  let cart = DATA.carteira;
+  let cartLabel = 'Carteira ICP';
+  let cartSub = `${DATA.mvp_size} Fora + ${DATA.fgc_size} Controle`;
+  if (f.bdr !== 'all') {
+    cart = DATA.carteira.filter(c => c.bdr === f.bdr);
+    cartLabel = `Carteira de ${f.bdr}`;
+    cartSub = `contas atribuídas no MVP`;
+  } else if (f.group !== 'all') {
+    cart = DATA.carteira.filter(c => c.group === f.group);
+    cartLabel = `Carteira ${f.group}`;
+    cartSub = '';
+  }
+
+  // Cobertura: quantas contas da carteira têm pelo menos 1 deal
+  const cartSf = new Set(cart.map(c => c.sfid));
+  const dealsByCart = DATA.deals.filter(d => cartSf.has(d.sf));
+  const tocadas = new Set(dealsByCart.map(d => d.sf)).size;
+  const cobertura = cart.length ? (tocadas/cart.length*100).toFixed(0) + '%' : '—';
+
   const items = [
-    { label:'Carteira ICP', value: DATA.carteira.length, sub:`${DATA.mvp_size} Fora + ${DATA.fgc_size} Controle`, click:() => openModal('Carteira ICP completa', enrichContas(DATA.carteira), CONTA_COLS) },
+    { label: cartLabel, value: cart.length, sub: cartSub, click:() => openModal(cartLabel, enrichContas(cart), CONTA_COLS) },
+    { label:'Tocadas (com deal)', value: tocadas, cls:'green', sub: `${cobertura} cobertura`, click:() => openModal('Contas tocadas', enrichContas(cart.filter(c => cartSf.has(c.sfid) && DATA.deals.some(d => d.sf===c.sfid))), CONTA_COLS) },
+    { label:'Sem deal', value: cart.length - tocadas, cls:'yellow', click:() => openModal('Contas sem deal', enrichContas(cart.filter(c => !DATA.deals.some(d => d.sf===c.sfid))), CONTA_COLS) },
     { label:'Deals (filtrados)', value: total.toLocaleString('pt-BR'), click:() => openModal('Todos os deals filtrados', filtered) },
     { label:'Ativos', value: ativos, cls:'green', sub: total?(`${(ativos/total*100).toFixed(1)}%`):'', click:() => openModal('Deals ativos', filtered.filter(isAtivo)) },
     { label:'Desqualificados', value: desq, cls:'red', sub: total?(`${(desq/total*100).toFixed(1)}%`):'', click:() => openModal('Deals desqualificados', filtered.filter(isDesq)) },
     { label:'Ganhos', value: ganho, cls:'green', click:() => openModal('Ganhos', filtered.filter(isGanho)) },
-    { label:'Deals Controle', value: ctlDeals, cls:'purple', click:() => openModal('Deals do Grupo Controle', filtered.filter(d => d.g==='Controle')) },
-    { label:'Deals BDRs', value: bdrDeals, cls:'yellow', click:() => openModal('Deals dos BDRs', filtered.filter(d => d.g==='BDRs')) },
   ];
   document.getElementById('kpiGeral').innerHTML = items.map((k,i) => `<div class="kpi ${k.cls||''}" data-k="${i}"><div class="label">${k.label}</div><div class="value">${k.value}</div>${k.sub?`<div class="sub">${k.sub}</div>`:''}</div>`).join('');
-  document.querySelectorAll('#kpiGeral .kpi').forEach((el, i) => el.onclick = items[i].click);
+  document.querySelectorAll('#kpiGeral .kpi').forEach((el, i) => { if (items[i].click) el.onclick = items[i].click; });
 }
 
 // ---------- CHART: por BDR ----------
