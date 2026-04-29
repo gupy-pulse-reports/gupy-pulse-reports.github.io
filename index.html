@@ -93,8 +93,13 @@ tr:hover td{background:#FAFBFC}
     <label>Período</label>
     <select id="fPeriod">
       <option value="all">Tudo</option>
+      <option value="today">Hoje</option>
+      <option value="yesterday">Ontem</option>
+      <option value="last_3d">Últimos 3 dias</option>
+      <option value="last_7d">Últimos 7 dias</option>
       <option value="this_week">Esta semana</option>
       <option value="last_week">Semana passada</option>
+      <option value="last_30d">Últimos 30 dias</option>
       <option value="last_month">Mês passado</option>
       <option value="last_quarter">Trimestre passado</option>
     </select>
@@ -110,6 +115,7 @@ tr:hover td{background:#FAFBFC}
   <button class="tab active" data-tab="geral">📊 Visão Geral</button>
   <button class="tab" data-tab="grupo">⚖️ Controle vs BDRs</button>
   <button class="tab" data-tab="contas">🏢 Contas ICP</button>
+  <button class="tab" data-tab="diario">📅 Diário</button>
 </div>
 
 <div class="container">
@@ -147,6 +153,20 @@ tr:hover td{background:#FAFBFC}
   <div class="card">
     <h3>Carteira ICP — todas as contas</h3><div class="desc">Filtre na busca pra encontrar conta específica</div>
     <div class="scrollable" style="max-height:600px"><table id="tableContas"></table></div>
+  </div>
+</div>
+
+
+<div id="tab-diario" class="tab-content">
+  <div class="note" id="diarioNote">📅 Acompanhamento diário baseado em <b>Data de criação</b> dos deals. Pra comparar movimentações reais entre dois dias (ex: deals que mudaram de etapa), o histórico começa hoje — a cada novo deploy eu salvo o snapshot e amanhã você consegue ver o diff real.</div>
+  <div class="kpi-grid" id="kpiDiario"></div>
+  <div class="grid grid-2">
+    <div class="card"><h3>Comparativo Hoje vs Ontem</h3><div class="desc">Deals criados em cada etapa</div><div class="chart-wrap tall"><canvas id="chartHojeOntem"></canvas></div><div class="hint">💡 Clique nas barras pra ver a lista</div></div>
+    <div class="card"><h3>Trend de criação — últimos 14 dias</h3><div class="desc">Deals criados por dia</div><div class="chart-wrap tall"><canvas id="chartTrend"></canvas></div><div class="hint">💡 Clique numa coluna pra ver os deals</div></div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Detalhe dia-a-dia (últimos 7 dias)</h3><div class="desc">Cada linha = um dia. Clique pra ver os deals daquele dia.</div>
+    <div class="scrollable"><table id="tableDiario"></table></div>
   </div>
 </div>
 
@@ -215,8 +235,13 @@ document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () =>
 function periodRange(p){
   if (p === 'all') return null;
   const t = new Date(TODAY);
+  if (p === 'today') return [t, t];
+  if (p === 'yesterday'){ const y = new Date(t); y.setDate(t.getDate()-1); return [y, y]; }
+  if (p === 'last_3d'){ const s = new Date(t); s.setDate(t.getDate()-2); return [s, t]; }
+  if (p === 'last_7d'){ const s = new Date(t); s.setDate(t.getDate()-6); return [s, t]; }
   if (p === 'this_week'){ const d = t.getDay()||7; const m = new Date(t); m.setDate(t.getDate()-(d-1)); return [m,t]; }
   if (p === 'last_week'){ const d = t.getDay()||7; const m = new Date(t); m.setDate(t.getDate()-(d-1)-7); const s = new Date(m); s.setDate(m.getDate()+6); return [m,s]; }
+  if (p === 'last_30d'){ const s = new Date(t); s.setDate(t.getDate()-29); return [s, t]; }
   if (p === 'last_month') return [new Date(t.getFullYear(), t.getMonth()-1, 1), new Date(t.getFullYear(), t.getMonth(), 0)];
   if (p === 'last_quarter'){ const q = Math.floor(t.getMonth()/3); return [new Date(t.getFullYear(), (q-1)*3, 1), new Date(t.getFullYear(), q*3, 0)]; }
   return null;
@@ -631,7 +656,99 @@ function render(){
     renderTabGrupo(filtered);
   } else if (activeTab === 'contas') {
     renderTabContas();
+  } else if (activeTab === 'diario') {
+    renderTabDiario(filtered);
   }
+}
+
+function fmtDate(d){
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${dd}/${mm}`;
+}
+function isoDate(d){
+  return d.toISOString().slice(0,10);
+}
+function renderTabDiario(filtered){
+  const today = isoDate(TODAY);
+  const yest = new Date(TODAY); yest.setDate(TODAY.getDate()-1);
+  const yestIso = isoDate(yest);
+
+  const todayDeals = filtered.filter(d => d.d === today);
+  const yestDeals  = filtered.filter(d => d.d === yestIso);
+
+  const items = [
+    { label:'Criados hoje', value: todayDeals.length, sub: today, click:() => openModal('Deals criados hoje', todayDeals) },
+    { label:'Criados ontem', value: yestDeals.length, sub: yestIso, cls:'yellow', click:() => openModal('Deals criados ontem', yestDeals) },
+    { label:'Δ Hoje−Ontem', value: (todayDeals.length-yestDeals.length>=0?'+':'')+(todayDeals.length-yestDeals.length), cls: todayDeals.length>=yestDeals.length?'green':'red' },
+    { label:'Em Reunião Ag. (criados últimos 7d)', value: filtered.filter(d => STAGE_FN.reuniao(d) && d.d && (TODAY - new Date(d.d))/(86400000) <= 7).length, cls:'green' },
+    { label:'Desqualif. (últimos 7d)', value: filtered.filter(d => isDesq(d) && d.d && (TODAY - new Date(d.d))/(86400000) <= 7).length, cls:'red' },
+  ];
+  document.getElementById('kpiDiario').innerHTML = items.map((k,i) => `<div class="kpi ${k.cls||''}"><div class="label">${k.label}</div><div class="value">${k.value}</div>${k.sub?`<div class="sub">${k.sub}</div>`:''}</div>`).join('');
+  document.querySelectorAll('#kpiDiario .kpi').forEach((el,i) => { if (items[i].click) el.onclick = items[i].click; });
+
+  // Hoje vs Ontem por etapa
+  const stages = [
+    { key:'novo', label:'Novo Lead' },
+    { key:'conectado', label:'Lead Conectado' },
+    { key:'abordagem', label:'Abordagem' },
+    { key:'reuniao', label:'Reunião Ag.' },
+    { key:'oportunidade', label:'Oportunidade' },
+    { key:'desqualificado', label:'Desqualificado' },
+  ];
+  makeChart('chartHojeOntem','hojeOntem',{
+    type:'bar',
+    data:{ labels: stages.map(s => s.label),
+      datasets:[
+        { label:`Hoje (${today})`, data: stages.map(s => todayDeals.filter(STAGE_FN[s.key]).length), backgroundColor:PALETTE.blue },
+        { label:`Ontem (${yestIso})`, data: stages.map(s => yestDeals.filter(STAGE_FN[s.key]).length), backgroundColor:PALETTE.gray },
+      ]},
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{position:'bottom'} },
+      onClick:(e,els) => {
+        if (!els.length) return;
+        const stage = stages[els[0].index];
+        const arr = els[0].datasetIndex===0?todayDeals:yestDeals;
+        const lab = els[0].datasetIndex===0?'Hoje':'Ontem';
+        openModal(`${lab} — ${stage.label}`, arr.filter(STAGE_FN[stage.key]));
+      }
+    }
+  });
+
+  // Trend 14 dias
+  const days = [];
+  for (let i=13; i>=0; i--){ const d = new Date(TODAY); d.setDate(TODAY.getDate()-i); days.push(d); }
+  const dayCounts = days.map(d => filtered.filter(x => x.d === isoDate(d)).length);
+  makeChart('chartTrend','trend',{
+    type:'bar',
+    data:{ labels: days.map(fmtDate), datasets:[{ label:'Criados', data:dayCounts,
+      backgroundColor: days.map((d,i) => i===days.length-1?PALETTE.blue:i===days.length-2?PALETTE.cyan:PALETTE.gray) }]},
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} },
+      onClick:(e,els) => {
+        if (!els.length) return;
+        const day = days[els[0].index];
+        openModal(`Criados em ${fmtDate(day)}`, filtered.filter(x => x.d === isoDate(day)));
+      }
+    }
+  });
+
+  // Tabela 7 dias
+  const last7 = days.slice(-7);
+  let html = '<thead><tr><th>Data</th><th>Total</th><th>Novo Lead</th><th>Conectado</th><th>Abordagem</th><th>Reunião</th><th>Oportunidade</th><th>Desqualif.</th></tr></thead><tbody>';
+  last7.forEach(d => {
+    const iso = isoDate(d);
+    const ds = filtered.filter(x => x.d === iso);
+    html += `<tr style="cursor:pointer" onclick='window._showDay(${JSON.stringify(iso)})'>
+      <td><b>${fmtDate(d)}</b></td><td>${ds.length}</td>
+      <td>${ds.filter(STAGE_FN.novo).length}</td>
+      <td>${ds.filter(STAGE_FN.conectado).length}</td>
+      <td>${ds.filter(STAGE_FN.abordagem).length}</td>
+      <td>${ds.filter(STAGE_FN.reuniao).length}</td>
+      <td>${ds.filter(STAGE_FN.oportunidade).length}</td>
+      <td>${ds.filter(STAGE_FN.desqualificado).length}</td></tr>`;
+  });
+  html += '</tbody>';
+  document.getElementById('tableDiario').innerHTML = html;
+  window._showDay = iso => openModal(`Deals criados em ${iso}`, filtered.filter(x => x.d === iso));
 }
 render();
 </script>
