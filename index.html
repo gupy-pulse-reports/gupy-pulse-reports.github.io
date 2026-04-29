@@ -63,6 +63,7 @@ tr:hover td{background:#FAFBFC}
 .status-sel.desq{background:#FEE2E2;color:#991B1B;border-color:#FCA5A5}
 .status-sel.opp{background:#EDE9FE;color:#5B21B6;border-color:#C4B5FD}
 .status-sel.agend{background:#D1FAE5;color:#065F46;border-color:#6EE7B7}
+.save-ind{display:inline-block;margin-left:4px;font-size:11px;font-weight:700}.save-ind.ok{color:#059669}.save-ind.pending{color:#D97706;animation:pulse 1s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .status-sel.criado{background:#DBEAFE;color:#1E40AF;border-color:#93C5FD}
 .divergence{display:inline-block;margin-left:6px;cursor:help;color:#DC2626;font-weight:700}
 .status-bar{background:#F0F9FF;border-left:4px solid #0EA5E9;padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:12px;color:#075985;display:flex;justify-content:space-between;align-items:center}
@@ -248,13 +249,31 @@ async function loadStatusesFromDB(){
   STATUS_LOADED = true;
 }
 
+const PENDING_SAVES = new Set();
+const BACKUP_KEY = 'fgc_status_backup_v2';
+function backupSave(sfid, v, me){
+  const b = JSON.parse(localStorage.getItem(BACKUP_KEY) || '{}');
+  if (!v) delete b[sfid];
+  else b[sfid] = { v, by:me, t: new Date().toISOString() };
+  localStorage.setItem(BACKUP_KEY, JSON.stringify(b));
+}
+function getBackup(){ try { return JSON.parse(localStorage.getItem(BACKUP_KEY) || '{}'); } catch(e){ return {}; } }
+
 async function setStatusFor(sfid, v){
+  if (!sfid){ console.warn('setStatusFor called without sfid'); return; }
   const me = getMyName();
   const prev = STATUS_CACHE[sfid];
-  // Optimistic update
+
+  // 1) ALWAYS backup to localStorage first (safety net)
+  backupSave(sfid, v, me);
+
+  // 2) Optimistic memory update
   if (!v) delete STATUS_CACHE[sfid];
   else STATUS_CACHE[sfid] = { v, by:me, t: new Date().toISOString() };
+  PENDING_SAVES.add(sfid);
   render();
+
+  // 3) Push to Supabase
   try {
     if (!v){
       const { error } = await sb.from('conta_status').delete().eq('sfid', sfid);
@@ -263,14 +282,40 @@ async function setStatusFor(sfid, v){
       const { error } = await sb.from('conta_status').upsert({ sfid, status:v, updated_by:me, updated_at:new Date().toISOString() }, { onConflict:'sfid' });
       if (error) throw error;
     }
+    PENDING_SAVES.delete(sfid);
+    render();
   } catch(e){
     console.error('Save failed:', e);
-    alert('Erro ao salvar status: ' + e.message);
-    if (prev) STATUS_CACHE[sfid] = prev; else delete STATUS_CACHE[sfid];
+    PENDING_SAVES.delete(sfid);
+    alert('⚠ Erro ao salvar status: ' + (e.message||e) + '\n\nO valor está salvo localmente como backup. Vou tentar de novo no próximo refresh.');
     render();
   }
 }
 window.__setStatusFor = setStatusFor;
+
+// Sync any pending backup entries to Supabase on load
+async function syncBackupToDB(){
+  const b = getBackup();
+  const entries = Object.entries(b);
+  if (!entries.length) return;
+  const me = localStorage.getItem('fgc_my_name') || 'anônimo';
+  let pushed = 0;
+  for (const [sfid, val] of entries){
+    const dbVal = STATUS_CACHE[sfid];
+    // Skip if DB already has same value
+    if (dbVal && dbVal.v === val.v) continue;
+    try {
+      const { error } = await sb.from('conta_status').upsert({
+        sfid, status: val.v, updated_by: val.by||me, updated_at: val.t||new Date().toISOString()
+      }, { onConflict:'sfid' });
+      if (!error){
+        STATUS_CACHE[sfid] = { v:val.v, by:val.by||me, t:val.t||new Date().toISOString() };
+        pushed++;
+      }
+    } catch(e){ console.warn('Backup sync failed for', sfid, e); }
+  }
+  if (pushed) console.log(`Backup sync: ${pushed} status sincronizados pro Supabase`);
+}
 
 async function clearAllStatus(){
   if (!confirm('Limpar TODOS os status manuais? (Apaga pra todo mundo, não dá pra desfazer)')) return;
@@ -323,11 +368,14 @@ function statusSelectHTML(sfid, currentDealForCsv){
   const meta = getStatusMeta(sfid);
   const opt = STATUS_OPTIONS.find(o => o.v === cur) || STATUS_OPTIONS[0];
   const tt = meta ? `Marcado por ${meta.by||'?'} em ${new Date(meta.t).toLocaleString('pt-BR')}` : '';
-  let h = `<select class="status-sel ${opt.cls}" title="${tt}" onchange="__setStatusFor(${JSON.stringify(sfid)}, this.value)">`;
+  const safeSfid = String(sfid).replace(/"/g,'&quot;');
+  const syncIcon = PENDING_SAVES.has(sfid) ? '<span class="save-ind pending" title="Sincronizando...">⏳</span>'
+                  : meta ? '<span class="save-ind ok" title="Salvo">✓</span>' : '';
+  let h = `<select class="status-sel ${opt.cls}" title="${tt}" data-sfid="${safeSfid}" onchange="window.__setStatusFor(this.dataset.sfid, this.value)">`;
   STATUS_OPTIONS.forEach(o => {
     h += `<option value="${o.v}" ${cur===o.v?'selected':''}>${o.label}</option>`;
   });
-  h += '</select>';
+  h += '</select>' + syncIcon;
   if (currentDealForCsv){
     const div = divergence(currentDealForCsv);
     if (div) h += `<span class="divergence" title="Divergência: status manual = ${div.stored} / CSV diz = ${div.csv}">⚠</span>`;
@@ -944,7 +992,7 @@ function renderTabDiario(filtered){
   window._showDay = iso => openModal(`Deals criados em ${iso}`, filtered.filter(x => x.d === iso));
 }
 async function checkLocalStorageRecovery(){
-  const old = localStorage.getItem('fgc_dash_status_v1');
+  const old = localStorage.getItem('fgc_dash_status_v1') || localStorage.getItem(BACKUP_KEY);
   const done = localStorage.getItem('fgc_dash_recovered');
   if (!old || done) return;
   let parsed;
@@ -1002,6 +1050,8 @@ async function checkLocalStorageRecovery(){
 }
 
 (async () => {
+  await loadStatusesFromDB();
+  await syncBackupToDB();  // empurra backup local pra DB se DB não tiver
   await loadStatusesFromDB();
   render();
   checkLocalStorageRecovery();
