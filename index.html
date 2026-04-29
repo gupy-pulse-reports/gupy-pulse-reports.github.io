@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <title>Dashboard ICP — Grupo Controle vs BDRs</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
 *{box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;background:#F5F7FA;color:#1F2937;font-size:14px}
@@ -211,19 +212,87 @@ const STATUS_OPTIONS = [
   { v:'desq:trab_recente', label:'Desq: Trabalhado recentemente', cls:'desq' },
   { v:'desq:p', label:'Desq: Empresa P', cls:'desq' },
 ];
-const STATUS_KEY = 'fgc_dash_status_v1';
-function loadAllStatus(){ try { return JSON.parse(localStorage.getItem(STATUS_KEY)||'{}'); } catch(e){ return {}; } }
-function saveAllStatus(o){ localStorage.setItem(STATUS_KEY, JSON.stringify(o)); }
-function getStatus(sfid){ return (loadAllStatus()[sfid]||{}).v || ''; }
-function setStatusFor(sfid, v){
-  const all = loadAllStatus();
-  if (!v) delete all[sfid]; else all[sfid] = { v, t: new Date().toISOString() };
-  saveAllStatus(all);
+// === Supabase shared backend ===
+const SB_URL = 'https://xhyamspiswwuryrtbmnc.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhoeWFtc3Bpc3d3dXJ5cnRibW5jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0NDEzNTUsImV4cCI6MjA5MTAxNzM1NX0.SMxM0SKfIxHFAdMcpyf59g16K4_O7nchBCtX8nltx6o';
+const sb = window.supabase.createClient(SB_URL, SB_KEY);
+
+let STATUS_CACHE = {};
+let STATUS_LOADED = false;
+
+function loadAllStatus(){ return STATUS_CACHE; }
+function getStatus(sfid){ return (STATUS_CACHE[sfid]||{}).v || ''; }
+function getStatusMeta(sfid){ return STATUS_CACHE[sfid] || null; }
+
+function getMyName(){
+  let n = localStorage.getItem('fgc_my_name');
+  if (!n){
+    n = (prompt('Identifique-se (nome ou apelido). Vai aparecer ao lado dos status que você marcar.', '') || '').trim();
+    if (!n) n = 'anônimo';
+    localStorage.setItem('fgc_my_name', n);
+  }
+  return n;
+}
+function setMyName(){
+  const cur = localStorage.getItem('fgc_my_name') || '';
+  const n = (prompt('Seu nome:', cur) || '').trim();
+  if (n) { localStorage.setItem('fgc_my_name', n); render(); }
+}
+window.__setMyName = setMyName;
+
+async function loadStatusesFromDB(){
+  const { data, error } = await sb.from('conta_status').select('*');
+  if (error){ console.error('Supabase load error:', error); return; }
+  STATUS_CACHE = {};
+  (data||[]).forEach(r => { STATUS_CACHE[r.sfid] = { v:r.status, by:r.updated_by, t:r.updated_at }; });
+  STATUS_LOADED = true;
+}
+
+async function setStatusFor(sfid, v){
+  const me = getMyName();
+  const prev = STATUS_CACHE[sfid];
+  // Optimistic update
+  if (!v) delete STATUS_CACHE[sfid];
+  else STATUS_CACHE[sfid] = { v, by:me, t: new Date().toISOString() };
   render();
+  try {
+    if (!v){
+      const { error } = await sb.from('conta_status').delete().eq('sfid', sfid);
+      if (error) throw error;
+    } else {
+      const { error } = await sb.from('conta_status').upsert({ sfid, status:v, updated_by:me, updated_at:new Date().toISOString() }, { onConflict:'sfid' });
+      if (error) throw error;
+    }
+  } catch(e){
+    console.error('Save failed:', e);
+    alert('Erro ao salvar status: ' + e.message);
+    if (prev) STATUS_CACHE[sfid] = prev; else delete STATUS_CACHE[sfid];
+    render();
+  }
 }
 window.__setStatusFor = setStatusFor;
-function clearAllStatus(){ if(confirm('Limpar todos os status manuais?')) { saveAllStatus({}); render(); } }
+
+async function clearAllStatus(){
+  if (!confirm('Limpar TODOS os status manuais? (Apaga pra todo mundo, não dá pra desfazer)')) return;
+  const { error } = await sb.from('conta_status').delete().neq('sfid','___never___');
+  if (error){ alert('Erro: '+error.message); return; }
+  STATUS_CACHE = {};
+  render();
+}
 window.__clearAllStatus = clearAllStatus;
+
+// Realtime sync
+sb.channel('status_realtime')
+  .on('postgres_changes', { event:'*', schema:'public', table:'conta_status' }, payload => {
+    if (payload.eventType === 'DELETE'){
+      delete STATUS_CACHE[payload.old.sfid];
+    } else {
+      const r = payload.new;
+      STATUS_CACHE[r.sfid] = { v:r.status, by:r.updated_by, t:r.updated_at };
+    }
+    render();
+  })
+  .subscribe();
 
 function csvStatusOf(deal){
   if (!deal) return '';
@@ -251,8 +320,10 @@ function divergence(d){
 }
 function statusSelectHTML(sfid, currentDealForCsv){
   const cur = getStatus(sfid);
+  const meta = getStatusMeta(sfid);
   const opt = STATUS_OPTIONS.find(o => o.v === cur) || STATUS_OPTIONS[0];
-  let h = `<select class="status-sel ${opt.cls}" onchange="__setStatusFor(${JSON.stringify(sfid)}, this.value)">`;
+  const tt = meta ? `Marcado por ${meta.by||'?'} em ${new Date(meta.t).toLocaleString('pt-BR')}` : '';
+  let h = `<select class="status-sel ${opt.cls}" title="${tt}" onchange="__setStatusFor(${JSON.stringify(sfid)}, this.value)">`;
   STATUS_OPTIONS.forEach(o => {
     h += `<option value="${o.v}" ${cur===o.v?'selected':''}>${o.label}</option>`;
   });
@@ -760,8 +831,10 @@ function render(){
   const all = loadAllStatus();
   const stCount = Object.keys(all).length;
   const divCount = DATA.deals.filter(d => divergence(d)).length;
+  const me = localStorage.getItem('fgc_my_name') || '—';
+  const synced = STATUS_LOADED ? '🟢 sincronizado (Supabase)' : '⏳ carregando...';
   document.getElementById('statusBar').innerHTML =
-    `<span><b>${stCount}</b> contas com status manual${divCount?` • <span style="color:#DC2626">⚠ ${divCount} divergências (manual ≠ CSV)</span>`:''} • Status salvo só neste navegador</span>` +
+    `<span><b>${stCount}</b> contas com status manual${divCount?` • <span style="color:#DC2626">⚠ ${divCount} divergências (manual ≠ CSV)</span>`:''} • Você: <b>${me}</b> <a href="#" onclick="event.preventDefault();__setMyName()" style="color:#0EA5E9">trocar</a> • ${synced}</span>` +
     (stCount?'<button onclick="__clearAllStatus()">Limpar todos</button>':'');
   const activeTab = document.querySelector('.tab.active').dataset.tab;
   if (activeTab === 'geral') {
@@ -870,7 +943,10 @@ function renderTabDiario(filtered){
   document.getElementById('tableDiario').innerHTML = html;
   window._showDay = iso => openModal(`Deals criados em ${iso}`, filtered.filter(x => x.d === iso));
 }
-render();
+(async () => {
+  await loadStatusesFromDB();
+  render();
+})();
 </script>
 </body>
 </html>
